@@ -1,0 +1,336 @@
+package com.hz.stickdoublerecyclerview.rv
+
+import android.content.Context
+import android.util.AttributeSet
+import android.view.*
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import androidx.viewpager.widget.ViewPager
+import kotlin.math.abs
+import kotlin.math.max
+
+class ParentRecyclerView : RecyclerView, OnFlingListener {
+    constructor(context: Context) : this(context, null)
+    constructor(context: Context, attrs: AttributeSet?) : this(context, attrs, 0)
+    constructor(context: Context, attrs: AttributeSet?, defStyle: Int) : super(
+        context,
+        attrs,
+        defStyle
+    )
+
+    private val ModelVertical = 1
+    private val ModelHorizontal = -1
+    private val ModelNone = 0
+
+    private var isChildTop = true
+    private var childTop = 0
+    private var initDownY = 0f
+    private var initDownX = 0f
+
+    /** move时y坐标*/
+    private var moveDownY = 0f
+
+    /** 分发给ChildView时y坐标*/
+    private var swipeChildY = 0f
+
+    //private var swipeSlideVertical = false
+    private var swipeModel = ModelNone
+    private var velocity: VelocityTracker? = null
+    private var velocityY = 0
+    private var isSelfTouch = true
+    private var mTouchSlop = 0
+
+    /** true 开启滑动冲突处理*/
+    var enableConflict = true
+
+    /** 开启快速滚动parent带动child联动效果(默认false)*/
+    var enableParentChain = false
+
+    /** 开启快速滚动child带动parent联动效果*/
+    var enableChildChain = true
+
+    /** 开启吸顶子view支持下拉刷新*/
+    var enableChildSwipeRefresh = false
+
+    /** 开启吸顶子view独占Parent高度，支持下拉刷新(enableChildSwipeRefresh=true)*/
+    var singleScreen = false
+    private var draggingY = 0
+    private var draggingTime = 0L
+    private var disallowIntercept = false
+    private var cancelTouch = false
+
+    private var innerViewPager: ViewPager? = null
+
+    private var childPagerContainer: View? = null
+
+    /**设置吸顶的高度margin */
+    private var stickyHeight = 0
+
+    private var innerIsStickyTop = false
+
+    private var stickyListener: ((isAtTop: Boolean) -> Unit)? = null
+
+
+    init {
+        mTouchSlop = ViewConfiguration.get(context).scaledTouchSlop
+        addOnScrollListener(object : OnScrollListener() {
+            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                /** 滚动停止且到了底部,快速滑动事件下发给child view*/
+                if (enableParentChain && SCROLL_STATE_IDLE == newState && isScrollBottom() && velocityY != 0 && isChildTop) {
+                    val manager = layoutManager
+                    if (manager is LinearLayoutManager) {
+                        val first = manager.findFirstVisibleItemPosition()
+                        val total = manager.itemCount - 1
+                        manager.getChildAt(total - first)?.let {
+                            searchViewGroup(recyclerView, it)
+                        }
+                    }
+                } else if (SCROLL_STATE_DRAGGING == newState) {
+                    draggingY = 0
+                    draggingTime = System.currentTimeMillis()
+                }
+            }
+
+            override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                if (SCROLL_STATE_DRAGGING == scrollState) {
+                    draggingY += dy
+                }
+
+            }
+
+            /** 采用递归算法遍历*/
+            fun searchViewGroup(parent: ViewGroup, child: View): Boolean {
+                if (flingChild(parent, child)) {
+                    return true
+                }
+                if (child is ViewGroup) {
+                    for (i in 0 until child.childCount) {
+                        val subChild = child.getChildAt(i)
+                        if (subChild is ViewGroup && searchViewGroup(parent, subChild)) {
+                            return true
+                        }
+                    }
+                }
+                return false
+            }
+
+            /** 确保child的屏幕坐标在parent内，主要适配ViewPager*/
+            fun flingChild(parent: ViewGroup, child: View): Boolean {
+
+                val locChild = IntArray(2)
+                val locParent = IntArray(2)
+                parent.getLocationOnScreen(locParent)
+                child.getLocationOnScreen(locChild)
+                val childX = locChild[0]
+                val parentX = locParent[0]
+                if (childX >= parentX && childX < (parentX + parent.measuredWidth) && child is OnChildFlingListener) {
+                    val step = (System.currentTimeMillis() - draggingTime).toInt()
+                    val speed = velocityY - 1000 * draggingY / max(1000, step)
+                    child.onChildFling(speed / 2)
+                    return true
+                }
+                return false
+            }
+        })
+    }
+
+
+    override fun onScrollTop(isTop: Boolean, top: Int) {
+        isChildTop = isTop
+        childTop = top
+    }
+
+    override fun onFling(childSpeed: Int) {
+        /** child带动parent联动效果,快速滑动事件下发给self view*/
+        if (enableChildChain && isChildTop) {
+            val speed = velocityY - childSpeed
+            fling(0, speed / 2)
+        }
+    }
+
+    override fun requestDisallowInterceptTouchEvent(disallowIntercept: Boolean) {
+        super.requestDisallowInterceptTouchEvent(disallowIntercept)
+        this.disallowIntercept = disallowIntercept
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (enableConflict) {
+            dispatchConflictTouchEvent(ev)
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
+
+    override fun onScrollChanged(l: Int, t: Int, oldl: Int, oldt: Int) {
+        super.onScrollChanged(l, t, oldl, oldt)
+        var currentStickyTop = false
+        if (childPagerContainer != null && childPagerContainer?.top == stickyHeight) {
+            currentStickyTop = true
+        }
+
+        if (currentStickyTop != innerIsStickyTop) {
+            innerIsStickyTop = currentStickyTop
+            stickyListener?.invoke(innerIsStickyTop)
+        }
+    }
+
+
+    /**
+     * 吸顶回调
+     */
+    fun setStickyListener(stickyListener: (isAtTop: Boolean) -> Unit) {
+        this.stickyListener = stickyListener
+    }
+
+    private fun dispatchConflictTouchEvent(ev: MotionEvent) {
+        //Log.e("xx","action=${ev.action},dx=${ev.x},dy=${ev.y}")
+        if (null == velocity) velocity = VelocityTracker.obtain()
+        velocity?.addMovement(ev)
+        when (ev.action) {
+            MotionEvent.ACTION_DOWN -> {
+                initDownX = ev.x
+                initDownY = ev.y
+                moveDownY = initDownY
+                disallowIntercept = false
+                swipeModel = 0
+                velocityY = 0
+            }
+            MotionEvent.ACTION_MOVE -> {
+                conflictTouchEvent(ev)
+            }
+            MotionEvent.ACTION_UP -> {
+                /**fixed刚吸顶会触发点击事件*/
+                if (cancelTouch && swipeModel == ModelNone && isScrollBottom()) {
+                    ev.action = MotionEvent.ACTION_CANCEL
+                }
+                swipeChildY = 0f
+                isSelfTouch = true
+                cancelTouch = false
+                velocity?.let {
+                    it.computeCurrentVelocity(1000, maxFlingVelocity.toFloat())
+                    velocityY = -it.getYVelocity(0).toInt()//.yVelocity.toInt()
+                    velocity?.recycle()
+                }
+                velocity = null
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                cancelTouch = true
+                velocity?.clear()
+            }
+        }
+    }
+
+    private fun conflictTouchEvent(ev: MotionEvent) {
+        /** 纵向滑动处理，横向滑动过滤*/
+        if (ModelNone == swipeModel) {
+            val dy = abs(ev.y - initDownY)
+            val dx = abs(ev.x - initDownX)
+            if ((dx >= mTouchSlop && dy > dx / 2) || dy >= mTouchSlop) {
+                swipeModel = ModelVertical
+            } else if (dx >= mTouchSlop) {
+                swipeModel = ModelHorizontal
+            }
+        }
+        /** true向上滑动*/
+        val directUp = (ev.y - moveDownY) <= 0
+        moveDownY = ev.y
+        if (ModelNone != swipeModel) {
+            if (enableChildSwipeRefresh && isScrollTop()) {
+                if (singleScreen) {
+                    if (!disallowIntercept) {
+                        dispatchChildTouch(ev)
+                    }
+                } else if (!directUp && !disallowIntercept) {
+                    swipeChildY = moveDownY
+                    dispatchChildTouch(ev)
+                } else if (directUp && disallowIntercept && moveDownY < swipeChildY) {
+                    swipeChildY = 0f
+                    dispatchSelfTouch(ev)
+                }
+            } else if (isScrollBottom()) {
+                if (ModelVertical == swipeModel && isChildTop && !directUp) {
+                    dispatchSelfTouch(ev, true)
+                } else if (!disallowIntercept) {
+                    dispatchChildTouch(ev)
+                }
+            }
+        }
+    }
+
+    private fun isScrollBottom() = !canScrollVertically(1)
+    private fun isScrollTop() = !canScrollVertically(-1)
+
+    /** 给selft view分发*/
+    private fun dispatchSelfTouch(ev: MotionEvent, force: Boolean = false) {
+        if (!isSelfTouch || force) {
+            isSelfTouch = true
+            requestDisallowInterceptTouchEvent(false)
+        }
+    }
+
+    /** 给child view分发*/
+    private fun dispatchChildTouch(ev: MotionEvent) {
+        if (isSelfTouch) {
+            isSelfTouch = false
+            dispatchCancelTouch(ev)
+            //val top = childTop + (layoutManager?.getChildAt(childCount-1)?.top?:0)
+            //val dy = if(singleScreen) ev.y else max(ev.y, top.toFloat())
+            val down = MotionEvent.obtain(
+                ev.downTime,
+                ev.eventTime,
+                MotionEvent.ACTION_DOWN,
+                ev.x,
+                ev.y,
+                0
+            )
+            dispatchTouchEvent(down)
+            requestDisallowInterceptTouchEvent(true)
+        }
+    }
+
+    private fun dispatchCancelTouch(ev: MotionEvent) {
+        val cancel = MotionEvent.obtain(ev)
+        cancel.action = MotionEvent.ACTION_CANCEL
+        dispatchTouchEvent(cancel)
+    }
+
+    fun setInnerViewPager(viewPager: ViewPager?) {
+        this.innerViewPager = viewPager
+    }
+
+
+    /**
+     * Activity调用方法
+     */
+    fun setStickyHeight(stickyHeight: Int) {
+        this.stickyHeight = stickyHeight
+        this.adjustChildPagerContainerHeight()
+    }
+
+    /**
+     * 由ChildRecyclerView上报ViewPager的父容器，主要用作调整高度
+     */
+    fun setChildPagerContainer(childPagerContainer: View) {
+        if (this.childPagerContainer != childPagerContainer) {
+            this.childPagerContainer = childPagerContainer
+            this.post {
+                adjustChildPagerContainerHeight()
+            }
+        }
+    }
+
+    /**
+     * 调整Child容器的高度
+     */
+    private fun adjustChildPagerContainerHeight() {
+        if (null != childPagerContainer) {
+            val layoutParams = childPagerContainer!!.layoutParams
+            val newHeight = this.height - stickyHeight
+            if (newHeight != layoutParams.height) {
+                layoutParams.height = newHeight
+                childPagerContainer!!.layoutParams = layoutParams
+            }
+        }
+    }
+
+}
